@@ -16,7 +16,17 @@ A user-level slash command that takes a plan from `superpowers:writing-plans` an
 | `/code-task <path>` | Treat as a path to an existing plan file. Load it. |
 | `/code-task <freeform description>` | Treat as a topic. Invoke `superpowers:brainstorming` → `superpowers:writing-plans`, then execute. |
 
-After a plan is in hand, show the path and ask the user to confirm before doing anything destructive.
+### Flags
+
+| Flag | Effect |
+|------|--------|
+| `--merge` | After Aria approves, auto-merge the PR (Phase 6) and notify with *"Pull Request Merged!"* (Phase 7). |
+| `--no-merge` | Skip Phase 6. After Aria approves, notify with *"Pull Request Ready to Merge!"* including any detected staging URL, then halt. |
+| *(no flag)* | Default = `--no-merge`. Safer baseline; user merges manually. |
+
+Flags may appear in any position in the invocation. Parsing strips them before treating the remainder as path/description.
+
+After a plan is in hand, show the path **and the resolved merge mode** to the user and ask them to confirm before doing anything destructive.
 
 ## Phase 0 — Preflight (bail-fast)
 
@@ -124,7 +134,11 @@ loop:
 
 **Reply discipline:** Reply to each comment with a one-liner — *"Fixed in `<commit-sha>`"* or *"Disagree because `<reason>` — leaving as-is."* Push back on substance rather than capitulating to bad feedback.
 
-## Phase 6 — Merge
+## Phase 6 — Merge (only if `--merge`)
+
+If invoked with `--no-merge` (the default), skip this entire phase and go to Phase 7.
+
+If invoked with `--merge`:
 
 1. Re-verify approval is current: `gh pr view <PR-URL> --json reviewDecision` → must be `APPROVED`.
 2. Re-verify CI is green: `gh pr checks <PR-URL>` → if any check is failing or pending, surface and bail (no red merges).
@@ -134,21 +148,49 @@ loop:
 
 ## Phase 7 — Notify
 
-1. Gather:
-   - `<repo-name>` from `gh repo view --json nameWithOwner -q .nameWithOwner` (yields `owner/repo`).
-   - `<PR #>` and `<PR title>` captured at PR creation.
-   - `<short description>` — 1-2 sentence distillation from the plan summary (not freely regenerated).
-2. Build the exact message:
-   ```
-   Pull Request Merged!
-   <repo-name> - PR #<num> - <PR title>
-   <short description of the changes or feature or bug fixed>
-   ```
-3. Invoke `/aria:notify <message>`. Report delivery status.
+Two message paths depending on merge mode.
+
+### Gather shared inputs
+
+- `<repo-name>` from `gh repo view --json nameWithOwner -q .nameWithOwner` (yields `owner/repo`).
+- `<PR #>` and `<PR title>` captured at PR creation.
+- `<short description>` — 1-2 sentence distillation from the plan summary (not freely regenerated).
+
+### Staging URL detection (for `--no-merge` path)
+
+Look for a per-PR preview/staging URL in this order; stop at first hit:
+
+1. **GitHub Deployments API:** `gh api repos/<owner>/<repo>/deployments?ref=<branch>` → if any active deployment has an `environment_url`, use it.
+2. **Status checks with deploy/preview targetURL:** `gh pr view <PR> --json statusCheckRollup` → look for a check whose name matches `/deploy|preview|vercel|netlify|render|fly/i` and has a non-empty `targetUrl`.
+3. **Bot comments:** scan `gh pr view <PR> --json comments` for `vercel[bot]`, `netlify[bot]`, etc., and extract the first URL they posted.
+4. If none found: omit the staging line from the message.
+
+### Path A — `--merge` was set and merge succeeded
+
+```
+Pull Request Merged!
+<repo-name> - PR #<num> - <PR title>
+<short description of the changes or feature or bug fixed>
+```
+
+### Path B — `--no-merge` (default), Aria approved, awaiting your merge
+
+```
+Pull Request Ready to Merge!
+<repo-name> - PR #<num> - <PR title>
+<short description of the changes or feature or bug fixed>
+Staging: <url>          # only if detected
+PR: <PR-URL>
+```
+
+Invoke `/aria:notify <message>` and report delivery status.
 
 ## Phase 8 — Final summary
 
-Print to the user: PR URL, merge commit SHA, branch-deleted confirmation, notify delivery status. Done.
+Print to the user, scaled to the path taken:
+
+- **`--merge` path:** PR URL, merge commit SHA, branch-deleted confirmation, notify delivery status.
+- **`--no-merge` path:** PR URL, Aria approval confirmation, staging URL (if detected), notify delivery status, and an explicit reminder that the branch is still live awaiting your manual merge.
 
 ## Cross-cutting concerns
 
@@ -167,4 +209,4 @@ Print to the user: PR URL, merge commit SHA, branch-deleted confirmation, notify
 
 ## Open questions
 
-None at spec time. Loop cap, merge strategy, pre-push check policy, branch naming, TDD enforcement, dirty-tree handling, worktree handling, and entry-point flexibility are all resolved.
+None at spec time. Loop cap, merge strategy, pre-push check policy, branch naming, TDD enforcement, dirty-tree handling, worktree handling, entry-point flexibility, and merge-mode flag are all resolved.
