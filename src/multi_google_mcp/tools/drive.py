@@ -7,7 +7,7 @@ import io
 from typing import Any
 
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
+from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
 from multi_google_mcp import config
 from multi_google_mcp.accounts import AccountStore
@@ -18,10 +18,33 @@ _store = AccountStore()
 
 _DEFAULT_FIELDS = "id,name,mimeType,size,parents,modifiedTime,webViewLink"
 
+# 1 MiB chunks for streaming reads. Small enough that an oversized native
+# export aborts within ~10 chunks of the 10 MiB cap; large enough that the
+# common case of a 50 KiB doc takes one round trip.
+_DOWNLOAD_CHUNK = 1024 * 1024
+
 
 def _check_size(size: int) -> None:
     if size > config.MAX_DRIVE_BYTES:
         raise DriveFileTooLarge(size, config.MAX_DRIVE_BYTES)
+
+
+def _download_chunked(request: Any) -> bytes:
+    """Stream a Drive request into memory, aborting if it exceeds the cap.
+
+    Native files (Docs/Sheets/Slides) report size=0 in metadata, so we
+    cannot pre-check. MediaIoBaseDownload lets us watch the cumulative
+    buffer size between chunks and raise before the entire export is
+    materialised.
+    """
+    buf = io.BytesIO()
+    downloader = MediaIoBaseDownload(buf, request, chunksize=_DOWNLOAD_CHUNK)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+        if buf.tell() > config.MAX_DRIVE_BYTES:
+            raise DriveFileTooLarge(buf.tell(), config.MAX_DRIVE_BYTES)
+    return buf.getvalue()
 
 
 def _service(account: str) -> Any:
@@ -53,12 +76,10 @@ def drive_read_file(account: str, file_id: str) -> dict[str, Any]:
     meta = svc.files().get(fileId=file_id, fields="id,name,mimeType,size").execute()
     export_mime = export_mime_for(meta["mimeType"])
     if export_mime:
-        # Google-native files report size=0 in metadata, so we can't pre-check.
-        # Fetch the export and check size before encoding into the response.
-        raw_bytes: bytes = (
-            svc.files().export(fileId=file_id, mimeType=export_mime).execute()
-        )
-        _check_size(len(raw_bytes))
+        # Native files (Docs/Sheets/Slides) report size=0, so we stream and
+        # abort if the buffer grows past MAX_DRIVE_BYTES.
+        request = svc.files().export(fileId=file_id, mimeType=export_mime)
+        raw_bytes = _download_chunked(request)
         return {
             "id": meta["id"],
             "name": meta["name"],

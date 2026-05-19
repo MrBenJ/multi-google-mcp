@@ -1,4 +1,5 @@
 import base64
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -48,14 +49,31 @@ def test_drive_get_file_metadata_returns_shaped(saved_account, mock_build):
     assert out["id"] == "f1"
 
 
-def test_drive_read_file_exports_google_doc_as_text(saved_account, mock_build):
+def test_drive_read_file_exports_google_doc_as_text(
+    saved_account, mock_build, monkeypatch
+):
     svc = mock_build["service"]
     svc.files().get().execute.return_value = {
         "id": "f1",
         "name": "doc",
         "mimeType": "application/vnd.google-apps.document",
     }
-    svc.files().export().execute.return_value = b"document body"
+    fake_request = MagicMock()
+    svc.files().export.return_value = fake_request
+
+    class OneShotDownloader:
+        """Mock MediaIoBaseDownload: write the body and signal done."""
+
+        def __init__(self, buf, req, chunksize=None):
+            self._buf = buf
+
+        def next_chunk(self):
+            self._buf.write(b"document body")
+            return None, True
+
+    monkeypatch.setattr(
+        "multi_google_mcp.tools.drive.MediaIoBaseDownload", OneShotDownloader
+    )
 
     out = drive_read_file("work", file_id="f1")
     assert out["mime"] == "text/plain"
@@ -135,20 +153,51 @@ def test_drive_read_file_rejects_oversized_binary_before_download(
     svc.files().get_media.assert_not_called()
 
 
-def test_drive_read_file_rejects_oversized_export_after_fetch(
-    saved_account, mock_build
+def test_drive_read_native_export_aborts_during_chunked_download_when_oversized(
+    saved_account, mock_build, monkeypatch
 ):
-    """Native files report size=0 in metadata, so we can only check after export."""
+    """Oversized native exports must stop streaming before buffering full payload.
+
+    Native (Docs/Sheets/Slides) files always report size=0 in metadata, so
+    we can't pre-check. The implementation must use MediaIoBaseDownload to
+    stream and abort as soon as the accumulated buffer crosses
+    MAX_DRIVE_BYTES — otherwise a huge Sheet still OOMs the server.
+    """
     svc = mock_build["service"]
     svc.files().get().execute.return_value = {
         "id": "f1",
         "name": "huge.gdoc",
         "mimeType": "application/vnd.google-apps.document",
     }
-    svc.files().export().execute.return_value = b"x" * (config.MAX_DRIVE_BYTES + 1)
+    svc.files().export.return_value = MagicMock()
+
+    chunks_yielded = 0
+    chunk = b"x" * 1_000_000  # 1 MiB per chunk
+
+    class NeverDoneDownloader:
+        """Yields 1MB chunks forever — only abort logic stops the loop."""
+
+        def __init__(self, buf, req, chunksize=None):
+            self._buf = buf
+
+        def next_chunk(self):
+            nonlocal chunks_yielded
+            chunks_yielded += 1
+            self._buf.write(chunk)
+            return None, False
+
+    monkeypatch.setattr(
+        "multi_google_mcp.tools.drive.MediaIoBaseDownload", NeverDoneDownloader
+    )
 
     with pytest.raises(DriveFileTooLarge):
         drive_read_file("work", file_id="f1")
+    # Cap is 10 MiB. With 1 MiB chunks the abort should kick in around chunk
+    # 11. Anything well below 50 proves we're actually chunking, not first
+    # accumulating the whole payload.
+    assert chunks_yielded < 50, (
+        f"abort took {chunks_yielded} chunks — implementation isn't streaming"
+    )
 
 
 def test_drive_upload_file_rejects_oversized_text(saved_account, mock_build):
