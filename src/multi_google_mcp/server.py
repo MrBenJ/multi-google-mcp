@@ -7,6 +7,7 @@ import json
 from dataclasses import asdict
 from typing import Any
 
+from googleapiclient.errors import HttpError
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
@@ -292,6 +293,36 @@ TOOL_REGISTRY: list[dict[str, Any]] = [
 ]
 
 
+def _invoke_tool(name: str, arguments: dict[str, Any]) -> str:
+    """Run a tool by name and return either JSON output or an error: text.
+
+    Every plausible operational failure is converted to a stable "error: ..."
+    string so the MCP transport never has to surface a Python exception.
+    Categories handled:
+
+    - MultiGoogleMcpError: account/oauth/drive-size errors, surfaced verbatim.
+    - HttpError: Google API errors (auth, quota, 4xx, 5xx).
+    - ValueError/TypeError/KeyError: malformed arguments (bad base64, wrong
+      kwarg names, missing required fields).
+    - Anything else: rendered with class name + message so a bug is at least
+      diagnosable from the client side without a full traceback.
+    """
+    entry = next((t for t in TOOL_REGISTRY if t["name"] == name), None)
+    if entry is None:
+        return f"error: unknown tool {name!r}"
+    try:
+        result = entry["handler"](arguments or {})
+    except MultiGoogleMcpError as e:
+        return f"error: {e}"
+    except HttpError as e:
+        return f"error: Google API error ({e.resp.status}): {e.reason}"
+    except (ValueError, TypeError, KeyError) as e:
+        return f"error: invalid arguments: {type(e).__name__}: {e}"
+    except Exception as e:
+        return f"error: internal error: {type(e).__name__}: {e}"
+    return json.dumps(result, default=str)
+
+
 def build_app() -> Server:
     app: Server = Server("multi-google-mcp")
 
@@ -310,14 +341,7 @@ def build_app() -> Server:
     async def call_tool(
         name: str, arguments: dict[str, Any]
     ) -> list[TextContent]:
-        entry = next((t for t in TOOL_REGISTRY if t["name"] == name), None)
-        if entry is None:
-            raise ValueError(f"unknown tool: {name}")
-        try:
-            result = entry["handler"](arguments or {})
-        except MultiGoogleMcpError as e:
-            return [TextContent(type="text", text=f"error: {e}")]
-        return [TextContent(type="text", text=json.dumps(result, default=str))]
+        return [TextContent(type="text", text=_invoke_tool(name, arguments))]
 
     return app
 
