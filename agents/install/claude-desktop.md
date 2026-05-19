@@ -512,3 +512,150 @@ The user can defer this phase. If they say "I'll connect an account later":
 
 1. Tell them: *"That's fine. The server will be wired into Claude Desktop in the next step, but it won't do anything useful until you add at least one account. When you're ready, just run `multi-google-mcp-auth add <label>` from any terminal."*
 2. Skip to Phase 5. The harness wiring is still useful even without accounts.
+
+---
+
+## Phase 5 — Wire the server into Claude Desktop's config
+
+Claude Desktop reads a JSON config file at startup to discover MCP servers. We add an entry for `multi-google` to that file. **Critically, we merge with whatever's already there — never clobber.**
+
+### Detection
+
+```bash
+jq -e '.mcpServers["multi-google"]' \
+  "$HOME/Library/Application Support/Claude/claude_desktop_config.json" \
+  2>/dev/null
+```
+
+If this returns the expected entry, skip to Phase 6.
+
+### Commands
+
+**Path:** `$HOME/Library/Application Support/Claude/claude_desktop_config.json` (macOS).
+
+> **Windows/Linux note:** The equivalent paths are `%APPDATA%\Claude\claude_desktop_config.json` on Windows and `~/.config/Claude/claude_desktop_config.json` on Linux. This runbook is tested on macOS only — if the user is on another platform, walk them through the path substitution and proceed with the same JSON merge logic.
+
+**Read-merge-write logic:**
+
+1. If the config file does not exist: create it with `{"mcpServers": {"multi-google": {"command": "multi-google-mcp"}}}` (pretty-printed with 2-space indent).
+
+2. If the config file exists: read it, validate it parses as JSON. If parse fails, **stop and surface the error** — do not overwrite a malformed config. Tell the user where the backup is.
+
+3. If parse succeeds: set `.mcpServers["multi-google"] = {"command": "multi-google-mcp"}`. Preserve all other top-level keys and all other entries inside `mcpServers`.
+
+4. Write the merged JSON back to the config path with 2-space indent.
+
+5. Always make a timestamped backup before writing.
+
+The agent does this using whichever tool is most reliable for it — typically reading the file, parsing in memory, modifying the structure, and writing it back via its file-write tool. The `jq`-based one-liner below is a sanity-checkable shortcut when the agent doesn't have a JSON-aware edit tool:
+
+```bash
+CFG="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+mkdir -p "$(dirname "$CFG")"
+test -f "$CFG" || echo '{}' > "$CFG"
+cp "$CFG" "${CFG}.bak.$(date +%Y%m%d-%H%M%S)"
+TMP="$(mktemp)"
+jq '.mcpServers["multi-google"] = {"command": "multi-google-mcp"}' "$CFG" > "$TMP" \
+  && mv "$TMP" "$CFG"
+```
+
+### User-facing template
+
+> "Now we tell Claude Desktop where to find this server. Claude Desktop has a config file at:
+>
+> `~/Library/Application Support/Claude/claude_desktop_config.json`
+>
+> I'm going to read what's already in it (so I don't overwrite any other servers you have configured), add an entry for `multi-google`, and write it back. I'll make a backup first."
+
+After the write:
+
+> "Done. Your config now includes a `multi-google` entry under `mcpServers`. I backed up your previous config to `<backup-path>` just in case. Next we restart Claude Desktop and verify."
+
+### Verification
+
+```bash
+jq -e '.mcpServers["multi-google"].command' \
+  "$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+```
+
+Must return `"multi-google-mcp"`.
+
+### Failure
+
+- **Existing config is invalid JSON:** Surface the parse error to the user. Tell them the path to the file, ask them to either fix the JSON manually or delete the file (which forces a clean default Claude Desktop config on next launch). Do **not** auto-fix — the file may contain settings unrelated to MCP that the user values.
+
+- **`jq` not installed:** Tell the user `brew install jq` (macOS). Retry after install.
+
+- **Write permission denied:** Surface the error. This usually means a permissions issue with the Claude Desktop application directory; the user may need to check that file's ownership.
+
+### Exit ramp
+
+None — this is the final modifying phase. If the user wants to defer the verify step (Phase 6), the install is technically done; they just won't know it works until they restart Claude Desktop.
+
+---
+
+## Phase 6 — Verify and restart
+
+The install is done on disk. Now we confirm Claude Desktop picks up the change.
+
+### Detection
+
+None — Phase 6 always runs.
+
+### Commands
+
+None on the shell side. This phase is conversational.
+
+### User-facing template
+
+> "We're done with the install. Two final steps to verify everything works.
+>
+> **Step 1: Fully quit Claude Desktop.** Cmd+Q (not just closing the window — Cmd+Q to fully quit). Then reopen Claude Desktop.
+>
+> **Step 2: Test a tool call.** Once Claude Desktop is open again, try a prompt like:
+>
+> *"Use multi-google to search my `<your-label>` Gmail for unread messages from this week."*
+>
+> If Claude calls a tool starting with `gmail_` (you'll see it in the conversation), the install worked. Let me know what happens."
+
+### Failure modes — and how to diagnose with the user
+
+**Tools don't appear / Claude doesn't call any `gmail_*` tool:**
+
+1. Confirm Claude Desktop actually restarted (not just window-closed).
+2. Run `multi-google-mcp` manually from a terminal:
+   ```bash
+   multi-google-mcp
+   ```
+   It should print nothing and wait on stdin. Ctrl-C to exit. If it errors at startup, surface the error — likely missing `client_secret.json` or some account-token issue.
+3. Verify the config one more time:
+   ```bash
+   jq '.mcpServers["multi-google"]' \
+     "$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+   ```
+   Should print the entry.
+4. Check Claude Desktop's own logs (Help → View Logs in the menu) for an error starting `multi-google`.
+
+**`Error: Account '<label>' not configured`:**
+
+The label the user typed doesn't match any added account. Either ask the user to use the right label, or run `multi-google-mcp-auth add <label>` for the one they want.
+
+### Exit ramp
+
+None — this is the success terminus.
+
+---
+
+## You're done
+
+When Phase 6 succeeds, tell the user:
+
+> "All set. Your `multi-google-mcp` install is wired into Claude Desktop and working. A few useful follow-ups whenever you need them:
+>
+> - **Add another account:** `multi-google-mcp-auth add <new-label>`
+> - **List configured accounts:** `multi-google-mcp-auth list`
+> - **Remove an account:** `multi-google-mcp-auth remove <label>`
+> - **Troubleshooting:** see the project README's Troubleshooting section.
+>
+> Happy to help if anything goes sideways later."
+
