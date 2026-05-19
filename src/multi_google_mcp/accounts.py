@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import builtins
 import datetime as dt
 import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from google.auth.transport.requests import Request as GoogleRequest
 from google.oauth2.credentials import Credentials
@@ -37,12 +38,12 @@ class AccountStore:
             raise OAuthClientNotConfigured()
         raw = json.loads(config.CLIENT_SECRET_PATH.read_text())
         installed = raw.get("installed") or raw.get("web") or raw
-        return installed
+        return cast(dict[str, Any], installed)
 
-    def list(self) -> list[AccountInfo]:
+    def list(self) -> builtins.list[AccountInfo]:
         if not config.ACCOUNTS_DIR.exists():
             return []
-        out: list[AccountInfo] = []
+        out: builtins.list[AccountInfo] = []
         for path in sorted(config.ACCOUNTS_DIR.glob("*.json")):
             data = json.loads(path.read_text())
             out.append(AccountInfo(label=data["label"], email=data["email"]))
@@ -56,7 +57,7 @@ class AccountStore:
         refresh_token: str,
         access_token: str,
         token_expiry: str,
-        scopes: list[str],
+        scopes: builtins.list[str],
     ) -> None:
         config.ACCOUNTS_DIR.mkdir(parents=True, exist_ok=True)
         path = self._path(label)
@@ -99,7 +100,7 @@ class AccountStore:
                 data["token_expiry"].replace("Z", "+00:00")
             ).replace(tzinfo=None)
 
-        creds = Credentials(
+        creds = Credentials(  # type: ignore[no-untyped-call]
             token=data["access_token"],
             refresh_token=data["refresh_token"],
             token_uri=client["token_uri"],
@@ -118,7 +119,7 @@ class AccountStore:
         if not (force or (creds.expired and creds.refresh_token)):
             return creds
         try:
-            creds.refresh(GoogleRequest())
+            creds.refresh(GoogleRequest())  # type: ignore[no-untyped-call]
         except Exception as e:
             # invalid_grant means the refresh token is gone (revoked, expired,
             # or scopes changed). Caller needs to rerun `auth_cli add <label>`.

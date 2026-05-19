@@ -39,6 +39,20 @@ python_version = "3.11"
 mypy_path = "src"
 packages = ["multi_google_mcp"]
 
+# Google client libs and mcp don't ship a py.typed marker, so strict mode
+# flags every call into them as untyped. Trust the libraries here.
+[[tool.mypy.overrides]]
+module = [
+    "googleapiclient.*",
+    "google_auth_oauthlib.*",
+    "google.auth.*",
+    "google.oauth2.*",
+    "mcp.*",
+]
+ignore_missing_imports = true
+disallow_untyped_calls = false
+disallow_untyped_decorators = false
+
 [dependency-groups]
 dev = [
     "pytest>=8.0.0",
