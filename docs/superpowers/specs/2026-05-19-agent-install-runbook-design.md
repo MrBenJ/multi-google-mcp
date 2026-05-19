@@ -179,7 +179,7 @@ at Phase N — [name]. Sound good?"
 
 ## 8. Phase 1 — GCP setup (interactive walkthrough)
 
-This is the longest and most user-facing phase. It's broken into eight
+This is the longest and most user-facing phase. It's broken into nine
 sub-phases, each with its own checkpoint. The agent does **one sub-phase
 per turn** — never batches.
 
@@ -194,7 +194,46 @@ per turn** — never batches.
 | **1e. Enable Drive API** | `open https://console.cloud.google.com/apis/library/drive.googleapis.com` | Same as 1c. |
 | **1f. OAuth consent screen** | `open https://console.cloud.google.com/apis/credentials/consent`. Walk through: User type = External → Create → fill App name, support email, dev contact → Save and continue (scopes screen) → Save and continue → Test users: add the user's own Gmail → Save and continue → Back to dashboard. | User confirms publishing status shows "Testing." |
 | **1g. Create OAuth client** | `open https://console.cloud.google.com/apis/credentials`. Instruct: Create credentials → OAuth client ID → Application type: Desktop app → Name it → Create → Download JSON. | User says they downloaded the file. |
-| **1h. Move client_secret.json** | Agent asks: "Is the downloaded file in your Downloads folder?" If yes, agent runs `mkdir -p ~/.config/multi-google-mcp && mv ~/Downloads/client_secret_*.json ~/.config/multi-google-mcp/client_secret.json`. | `jq -e '.installed.client_id' ~/.config/multi-google-mcp/client_secret.json` returns a non-empty string. |
+| **1h. Locate and confirm the downloaded file** | Agent enumerates candidate files with `ls -lt ~/Downloads/client_secret_*.json 2>/dev/null` (newest first, includes mtime). Then routes per §8.1.1 — NEVER blind-globs into a `mv` command. | One specific file path is confirmed with the user. |
+| **1i. Move and verify** | With the path confirmed in 1h, agent runs (with the literal confirmed path, no glob): `mkdir -p ~/.config/multi-google-mcp && mv "<CONFIRMED_PATH>" ~/.config/multi-google-mcp/client_secret.json`. | `ls ~/.config/multi-google-mcp/client_secret.json` succeeds AND `jq -e '.installed.client_id' ~/.config/multi-google-mcp/client_secret.json` returns a non-empty string. |
+
+### 8.1.1 Sub-phase 1h decision tree — multi-match safety
+
+A user who has worked with GCP before may have multiple `client_secret_*.json`
+files already sitting in `~/Downloads/`. A blind glob (`mv ~/Downloads/client_secret_*.json …`)
+fails noisily on multiple matches and, worse, may silently pick the wrong
+file on shells that expand to alphabetical order. The agent MUST handle
+each match-count case explicitly:
+
+- **Zero matches** — Agent says: *"I don't see a file matching `client_secret_*.json`
+  in your Downloads folder. A few possibilities — (a) the browser saved it
+  somewhere else (Desktop? a project folder?); (b) the download was renamed
+  to something else; (c) the download hasn't finished. Could you tell me
+  where the file ended up? I just need the full path."* Then loops back
+  with the user-provided path, validates the file exists and parses as
+  JSON, and proceeds to 1i.
+
+- **Exactly one match** — Agent says: *"I see one matching file: `<path>`
+  (downloaded `<mtime>`). Is this the OAuth client you just created?"*
+  Wait for explicit yes/no. On yes → proceed to 1i with that path. On no →
+  ask user for the actual path and validate as in the zero-matches case.
+
+- **Multiple matches** — Agent says: *"I found `<N>` files in Downloads
+  matching `client_secret_*.json`:"* (lists each with its mtime in
+  newest-first order) *"Which one did we just create? Reply with the
+  filename, or say 'newest' if you'd like me to use the top one."*
+  - If user says "newest" or names the top file → proceed to 1i with that
+    path.
+  - If user names a different file → proceed to 1i with that path.
+  - If user is unsure → agent suggests they re-download from GCP
+    Credentials (one fresh download disambiguates everything), then re-runs
+    1h on the new file.
+
+In all paths, the agent validates the chosen path with
+`jq -e '.installed.client_id' "<chosen-path>"` BEFORE running the `mv`.
+A file that doesn't parse as the expected OAuth-client JSON shape is a
+hard stop: agent reports the mismatch to the user and re-enters 1h's
+decision tree.
 
 ### 8.2 GCP-specific exit ramp
 
@@ -216,12 +255,15 @@ back-and-forth, the agent:
 - Do **not** invent any console.google.com URL. Use only the deep-link URLs
   listed in the runbook's commands block.
 - Do **not** claim a sub-phase succeeded without explicit user confirmation
-  OR an objective state check (the `jq` verification in 1h).
+  OR an objective state check (the `jq` verification in 1i).
 - Do **not** attempt to log into the user's Google account or use any
   browser-automation tooling. The runbook is strictly conversational at
   this phase.
-- Do **not** advance from sub-phase 1h to Phase 2 if `jq` verification
+- Do **not** advance from sub-phase 1i to Phase 2 if `jq` verification
   fails. Stop and ask the user to confirm what they downloaded.
+- Do **not** use a globbed path (`client_secret_*.json`) as the source
+  argument to `mv` in sub-phase 1i. Always pass the literal file path
+  confirmed during the 1h decision tree. See §8.1.1 for the reasoning.
 
 ## 9. Phase 2 — Install `uv`
 
