@@ -157,6 +157,58 @@ def test_save_does_not_create_files_outside_accounts_dir(tmp_config_dir: Path):
     assert not (tmp_config_dir.parent / "tmp" / "leaked.json").exists()
 
 
+def test_save_leaves_no_temp_files_behind(tmp_config_dir: Path):
+    store = AccountStore()
+    store.save(
+        label="work",
+        email="a@b.com",
+        refresh_token="r",
+        access_token="a",
+        token_expiry="2099-01-01T00:00:00Z",
+        scopes=["s"],
+    )
+    leftovers = list((tmp_config_dir / "accounts").glob("*.tmp.*"))
+    assert leftovers == []
+
+
+def test_on_refresh_leaves_no_temp_files_behind(tmp_config_dir: Path):
+    write_account_file(tmp_config_dir / "accounts", "work", "a@b.com")
+    _write_fake_client_secret(tmp_config_dir)
+    store = AccountStore()
+    creds = store.credentials("work")
+    creds.token = "NEW"  # type: ignore[misc]
+    creds.expiry = dt.datetime(2099, 12, 31)  # type: ignore[misc]
+    store._on_refresh("work", creds)
+    leftovers = list((tmp_config_dir / "accounts").glob("*.tmp.*"))
+    assert leftovers == []
+
+
+def test_on_refresh_preserves_original_on_replace_error(tmp_config_dir: Path):
+    """If the atomic replace fails mid-way, the original token must survive.
+
+    We monkey-patch os.replace to blow up after the tmp file has been written
+    and assert the original file is untouched. The .tmp.* file may linger
+    (that's the expected failure mode for transient I/O issues) — what
+    matters is that the live token is not corrupted.
+    """
+    write_account_file(tmp_config_dir / "accounts", "work", "a@b.com")
+    _write_fake_client_secret(tmp_config_dir)
+    store = AccountStore()
+    creds = store.credentials("work")
+    creds.token = "NEW"  # type: ignore[misc]
+    creds.expiry = dt.datetime(2099, 12, 31)  # type: ignore[misc]
+
+    original_data = (tmp_config_dir / "accounts" / "work.json").read_text()
+    with patch(
+        "multi_google_mcp.accounts.os.replace",
+        side_effect=OSError("simulated"),
+    ), pytest.raises(OSError):
+        store._on_refresh("work", creds)
+    assert (
+        tmp_config_dir / "accounts" / "work.json"
+    ).read_text() == original_data
+
+
 def test_credentials_raises_account_needs_reauth_on_invalid_grant(tmp_config_dir: Path):
     write_account_file(tmp_config_dir / "accounts", "work", "a@b.com")
     _write_fake_client_secret(tmp_config_dir)

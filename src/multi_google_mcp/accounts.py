@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import builtins
+import contextlib
 import datetime as dt
+import fcntl
 import json
 import os
 import re
+import secrets
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -30,6 +34,47 @@ _LABEL_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 def _validate_label(label: str) -> None:
     if not isinstance(label, str) or not _LABEL_RE.fullmatch(label):
         raise InvalidAccountLabel(label)
+
+
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    """Write JSON to path atomically with chmod 600.
+
+    A partial write (interrupted process, full disk) won't corrupt the live
+    token file because os.replace is an atomic rename on POSIX. A linger
+    .tmp.* file is the worst case and is harmless on next refresh.
+    """
+    tmp_path = path.with_name(f"{path.name}.tmp.{secrets.token_hex(8)}")
+    try:
+        with open(tmp_path, "w") as fh:
+            json.dump(payload, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, path)
+    except Exception:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp_path)
+        raise
+
+
+@contextlib.contextmanager
+def _file_lock(path: Path) -> Iterator[None]:
+    """Advisory exclusive lock on a sidecar .lock file.
+
+    Guards the read-modify-write cycle in _on_refresh against another
+    instance of the server (or the auth CLI) refreshing the same account
+    concurrently. fcntl.flock is process-scoped on POSIX, which is what we
+    want for the single-user local deployment.
+    """
+    lock_path = path.with_name(f"{path.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 @dataclass(frozen=True)
@@ -73,8 +118,9 @@ class AccountStore:
     ) -> None:
         config.ACCOUNTS_DIR.mkdir(parents=True, exist_ok=True)
         path = self._path(label)
-        path.write_text(
-            json.dumps(
+        with _file_lock(path):
+            _atomic_write_json(
+                path,
                 {
                     "label": label,
                     "email": email,
@@ -82,10 +128,8 @@ class AccountStore:
                     "access_token": access_token,
                     "token_expiry": token_expiry,
                     "scopes": scopes,
-                }
+                },
             )
-        )
-        os.chmod(path, 0o600)
 
     def remove(self, label: str) -> None:
         path = self._path(label)
@@ -144,11 +188,11 @@ class AccountStore:
     def _on_refresh(self, label: str, creds: Credentials) -> None:
         """Persist refreshed access token + expiry back to disk."""
         path = self._path(label)
-        data = json.loads(path.read_text())
-        data["access_token"] = creds.token
-        if creds.expiry is not None:
-            data["token_expiry"] = (
-                creds.expiry.replace(microsecond=0).isoformat() + "Z"
-            )
-        path.write_text(json.dumps(data))
-        os.chmod(path, 0o600)
+        with _file_lock(path):
+            data = json.loads(path.read_text())
+            data["access_token"] = creds.token
+            if creds.expiry is not None:
+                data["token_expiry"] = (
+                    creds.expiry.replace(microsecond=0).isoformat() + "Z"
+                )
+            _atomic_write_json(path, data)
