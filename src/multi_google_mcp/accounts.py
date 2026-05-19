@@ -37,18 +37,23 @@ def _validate_label(label: str) -> None:
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-    """Write JSON to path atomically with chmod 600.
+    """Write JSON to path atomically with mode 0o600 from the start.
 
-    A partial write (interrupted process, full disk) won't corrupt the live
-    token file because os.replace is an atomic rename on POSIX. A linger
-    .tmp.* file is the worst case and is harmless on next refresh.
+    The temp file is opened via os.open with O_CREAT|O_EXCL|O_WRONLY and
+    mode 0o600 so the refresh tokens are never momentarily readable by
+    other local users under a permissive umask (e.g. 0o022 would otherwise
+    leave them at 0o644). os.replace is atomic on POSIX, so a partial
+    write can't corrupt the live token file. A leftover .tmp.* file in
+    the unlikely failure window is harmless.
     """
     tmp_path = path.with_name(f"{path.name}.tmp.{secrets.token_hex(8)}")
     try:
-        with open(tmp_path, "w") as fh:
+        fd = os.open(tmp_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "w") as fh:
             json.dump(payload, fh)
             fh.flush()
             os.fsync(fh.fileno())
+        # Belt-and-braces in case the platform ignored the open mode.
         os.chmod(tmp_path, 0o600)
         os.replace(tmp_path, path)
     except Exception:

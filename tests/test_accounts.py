@@ -1,5 +1,6 @@
 import datetime as dt
 import json
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -181,6 +182,46 @@ def test_on_refresh_leaves_no_temp_files_behind(tmp_config_dir: Path):
     store._on_refresh("work", creds)
     leftovers = list((tmp_config_dir / "accounts").glob("*.tmp.*"))
     assert leftovers == []
+
+
+def test_atomic_write_creates_temp_file_with_mode_0600_under_permissive_umask(
+    tmp_config_dir: Path,
+):
+    """Temp file must be created with restrictive perms from the START.
+
+    Forces umask 022 (the common default) and patches os.chmod to a no-op,
+    so the only way the final mode can be 0o600 is if the file was opened
+    with that mode in the first place. If the implementation falls back to
+    plain open() then chmod 600, this test will see 0o644 and fail —
+    catching the secret-exposure window Aria flagged.
+    """
+    captured_modes: list[int] = []
+    real_replace = os.replace
+
+    def probe_replace(src, dst):
+        captured_modes.append(os.stat(src).st_mode & 0o777)
+        return real_replace(src, dst)
+
+    old_umask = os.umask(0o022)
+    try:
+        with patch("multi_google_mcp.accounts.os.chmod"), patch(
+            "multi_google_mcp.accounts.os.replace", side_effect=probe_replace
+        ):
+            AccountStore().save(
+                label="work",
+                email="a@b.com",
+                refresh_token="r",
+                access_token="a",
+                token_expiry="2099-01-01T00:00:00Z",
+                scopes=["s"],
+            )
+    finally:
+        os.umask(old_umask)
+
+    assert captured_modes == [0o600], (
+        f"temp file was created with mode {captured_modes!r} — "
+        "secrets exposed during the open->chmod window"
+    )
 
 
 def test_on_refresh_preserves_original_on_replace_error(tmp_config_dir: Path):
