@@ -492,11 +492,13 @@ After the user picks a label, run `multi-google-mcp-auth add <label>` and:
 ### Verification
 
 ```bash
+# Confirm the token file exists and contains a non-null refresh_token,
+# without ever printing the secret. Both commands must succeed.
 test -f ~/.config/multi-google-mcp/accounts/<label>.json
-jq -e '.refresh_token' ~/.config/multi-google-mcp/accounts/<label>.json
+jq -e '.refresh_token != null' ~/.config/multi-google-mcp/accounts/<label>.json >/dev/null
 ```
 
-Both must succeed.
+Both must succeed. **Never** run `jq '.refresh_token' …` without `>/dev/null` — that prints the live OAuth refresh token to your output, which is logged and indexed by your conversation transcript.
 
 ### Failure
 
@@ -517,45 +519,69 @@ The user can defer this phase. If they say "I'll connect an account later":
 
 Codex reads MCP server definitions from `~/.codex/config.toml`. We append a `[mcp_servers.multi-google]` section to that file. **Critically, we preserve everything that's already there — never rewrite the whole file.**
 
+> **Why an absolute path?** Codex is typically launched from a terminal so it inherits your shell's PATH — but only when the terminal's environment is fully set up. If a user invokes `codex` from a non-login shell, a launchd-spawned task, or a GUI wrapper, `~/.local/bin` (where `uv tool install` puts the binary) may not be on PATH. Using the absolute path makes the config robust across all launch contexts. We resolve it with `command -v` at write time and store that.
+
 ### Detection
 
 ```bash
 grep -q '^\[mcp_servers\.multi-google\]' "$HOME/.codex/config.toml" 2>/dev/null
 ```
 
-If this matches, also verify the command line:
+If this matches, also verify the stored command points at an existing executable:
 
 ```bash
-grep -A2 '^\[mcp_servers\.multi-google\]' "$HOME/.codex/config.toml" \
-  | grep -q 'command = "multi-google-mcp"'
+STORED_CMD="$(grep -A2 '^\[mcp_servers\.multi-google\]' "$HOME/.codex/config.toml" \
+  | sed -n 's/^command = "\(.*\)"$/\1/p' | head -1)"
+[ -n "$STORED_CMD" ] && [ -x "$STORED_CMD" ]
 ```
 
-If both pass, skip to Phase 6.
+If both pass, skip to Phase 6. If the section exists but `STORED_CMD` isn't executable (typical with a bare-name install pre-this-runbook), continue with Phase 5 to overwrite with the absolute path.
 
 ### Commands
 
 **Path:** `$HOME/.codex/config.toml`.
 
-**Append-only logic:**
+**Append-or-replace logic:**
 
-1. Ensure the parent directory exists: `mkdir -p ~/.codex`.
-2. If the config file does not exist: create it containing only the new section.
-3. If the config file exists: check whether `[mcp_servers.multi-google]` already appears (case-sensitive). If yes, stop — it's already wired. If no, append a leading blank line followed by the section.
-4. Always make a timestamped backup before writing.
+1. Resolve the absolute path of the server binary: `MGM_BIN="$(command -v multi-google-mcp)"`. Bail with a clear error if this is empty (Phase 3 should have caught that already, but defense in depth).
+2. Ensure the parent directory exists: `mkdir -p ~/.codex`.
+3. If the config file does not exist: create it containing only the new section.
+4. If the config file exists AND already has a `[mcp_servers.multi-google]` section: rewrite just that section (leaving everything else untouched) so the `command` line points at `$MGM_BIN`.
+5. If the config file exists AND does not have the section yet: append a leading blank line followed by the new section.
+6. Always make a timestamped backup before writing.
 
 ```bash
 CFG="$HOME/.codex/config.toml"
+MGM_BIN="$(command -v multi-google-mcp)"
+[ -n "$MGM_BIN" ] || { echo "multi-google-mcp not on PATH — rerun Phase 3 first."; exit 1; }
 mkdir -p "$(dirname "$CFG")"
+test -f "$CFG" && cp "$CFG" "${CFG}.bak.$(date +%Y%m%d-%H%M%S)"
 
-if grep -q '^\[mcp_servers\.multi-google\]' "$CFG" 2>/dev/null; then
-  echo "Already wired — leaving config alone."
+if [ -f "$CFG" ] && grep -q '^\[mcp_servers\.multi-google\]' "$CFG"; then
+  # In-place replace: rewrite just the multi-google section. The awk
+  # script emits all lines outside the section, replaces the section
+  # body with a freshly-built version, and exits the section on either
+  # the next [section] header OR a blank line (so the blank between
+  # sections is preserved).
+  TMP="$(mktemp)"
+  awk -v cmd="$MGM_BIN" '
+    BEGIN { in_sec = 0 }
+    /^\[mcp_servers\.multi-google\][[:space:]]*$/ {
+      in_sec = 1
+      print "[mcp_servers.multi-google]"
+      print "command = \"" cmd "\""
+      next
+    }
+    in_sec && /^\[/ { in_sec = 0 }
+    in_sec && /^$/ { in_sec = 0 }
+    !in_sec { print }
+  ' "$CFG" > "$TMP" && mv "$TMP" "$CFG"
 else
-  test -f "$CFG" && cp "$CFG" "${CFG}.bak.$(date +%Y%m%d-%H%M%S)"
   {
     test -f "$CFG" && cat "$CFG"
     test -f "$CFG" && echo ""
     echo "[mcp_servers.multi-google]"
-    echo 'command = "multi-google-mcp"'
+    echo "command = \"$MGM_BIN\""
   } > "${CFG}.new"
   mv "${CFG}.new" "$CFG"
 fi
@@ -567,21 +593,22 @@ fi
 >
 > `~/.codex/config.toml`
 >
-> I'm going to read what's already in it (so I don't disturb any other settings you have), add a `[mcp_servers.multi-google]` section, and write it back. I'll make a backup first."
+> I'm going to read what's already in it (so I don't disturb any other settings you have), add a `[mcp_servers.multi-google]` section with the absolute path to the server (`<MGM_BIN>`), and write it back. I'll make a backup first."
 
 After the write:
 
-> "Done. Your config now includes the `multi-google` server. I backed up your previous config to `<backup-path>` just in case. Next we restart Codex and verify."
+> "Done. Your config now includes the `multi-google` server pointing at `<MGM_BIN>`. I backed up your previous config to `<backup-path>` just in case. Next we restart Codex and verify."
 
 ### Verification
 
 ```bash
 grep -q '^\[mcp_servers\.multi-google\]' "$HOME/.codex/config.toml"
-grep -A2 '^\[mcp_servers\.multi-google\]' "$HOME/.codex/config.toml" \
-  | grep -q 'command = "multi-google-mcp"'
+STORED_CMD="$(grep -A2 '^\[mcp_servers\.multi-google\]' "$HOME/.codex/config.toml" \
+  | sed -n 's/^command = "\(.*\)"$/\1/p' | head -1)"
+[ -n "$STORED_CMD" ] && [ -x "$STORED_CMD" ]
 ```
 
-Both must succeed.
+All three checks must succeed — the section exists, the command was parsed back out, and the stored path points at an executable file.
 
 ### Failure
 

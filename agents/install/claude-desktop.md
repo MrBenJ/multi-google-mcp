@@ -494,11 +494,13 @@ After the user picks a label, run `multi-google-mcp-auth add <label>` and:
 ### Verification
 
 ```bash
+# Confirm the token file exists and contains a non-null refresh_token,
+# without ever printing the secret. Both commands must succeed.
 test -f ~/.config/multi-google-mcp/accounts/<label>.json
-jq -e '.refresh_token' ~/.config/multi-google-mcp/accounts/<label>.json
+jq -e '.refresh_token != null' ~/.config/multi-google-mcp/accounts/<label>.json >/dev/null
 ```
 
-Both must succeed.
+Both must succeed. **Never** run `jq '.refresh_token' …` without `>/dev/null` — that prints the live OAuth refresh token to your output, which is logged and indexed by your conversation transcript.
 
 ### Failure
 
@@ -519,15 +521,25 @@ The user can defer this phase. If they say "I'll connect an account later":
 
 Claude Desktop reads a JSON config file at startup to discover MCP servers. We add an entry for `multi-google` to that file. **Critically, we merge with whatever's already there — never clobber.**
 
+> **Why an absolute path?** Claude Desktop is a GUI app. When macOS launches it from Finder, the Dock, or Spotlight, the process inherits `launchd`'s minimal PATH (`/usr/bin:/bin:/usr/sbin:/sbin`) — **not** the PATH your shell sees. `uv tool install` places binaries in `~/.local/bin/`, which is on your shell's PATH but **not** on the GUI's. So a config entry with the bare command `"multi-google-mcp"` looks fine in a terminal but fails to spawn when Claude Desktop is launched normally. We resolve the absolute path with `command -v` at write time and store that.
+
 ### Detection
 
 ```bash
 jq -e '.mcpServers["multi-google"]' \
   "$HOME/Library/Application Support/Claude/claude_desktop_config.json" \
-  2>/dev/null
+  2>/dev/null >/dev/null
 ```
 
-If this returns the expected entry, skip to Phase 6.
+If this exits 0, also verify the stored command points at an existing executable:
+
+```bash
+STORED_CMD="$(jq -r '.mcpServers["multi-google"].command' \
+  "$HOME/Library/Application Support/Claude/claude_desktop_config.json")"
+[ -x "$STORED_CMD" ]
+```
+
+If both pass, skip to Phase 6. If the entry exists but `STORED_CMD` isn't executable (typical with a bare-name install pre-this-runbook), continue with Phase 5 to overwrite with the absolute path.
 
 ### Commands
 
@@ -537,25 +549,24 @@ If this returns the expected entry, skip to Phase 6.
 
 **Read-merge-write logic:**
 
-1. If the config file does not exist: create it with `{"mcpServers": {"multi-google": {"command": "multi-google-mcp"}}}` (pretty-printed with 2-space indent).
-
-2. If the config file exists: read it, validate it parses as JSON. If parse fails, **stop and surface the error** — do not overwrite a malformed config. Tell the user where the backup is.
-
-3. If parse succeeds: set `.mcpServers["multi-google"] = {"command": "multi-google-mcp"}`. Preserve all other top-level keys and all other entries inside `mcpServers`.
-
-4. Write the merged JSON back to the config path with 2-space indent.
-
-5. Always make a timestamped backup before writing.
+1. Resolve the absolute path of the server binary: `MGM_BIN="$(command -v multi-google-mcp)"`. Bail with a clear error if this is empty (Phase 3 should have caught that already, but defense in depth).
+2. If the config file does not exist: create it with `{"mcpServers": {"multi-google": {"command": "<MGM_BIN>"}}}` (pretty-printed with 2-space indent).
+3. If the config file exists: read it, validate it parses as JSON. If parse fails, **stop and surface the error** — do not overwrite a malformed config. Tell the user where the backup is.
+4. If parse succeeds: set `.mcpServers["multi-google"] = {"command": "<MGM_BIN>"}`. Preserve all other top-level keys and all other entries inside `mcpServers`.
+5. Write the merged JSON back to the config path with 2-space indent.
+6. Always make a timestamped backup before writing.
 
 The agent does this using whichever tool is most reliable for it — typically reading the file, parsing in memory, modifying the structure, and writing it back via its file-write tool. The `jq`-based one-liner below is a sanity-checkable shortcut when the agent doesn't have a JSON-aware edit tool:
 
 ```bash
 CFG="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+MGM_BIN="$(command -v multi-google-mcp)"
+[ -n "$MGM_BIN" ] || { echo "multi-google-mcp not on PATH — rerun Phase 3 first."; exit 1; }
 mkdir -p "$(dirname "$CFG")"
 test -f "$CFG" || echo '{}' > "$CFG"
 cp "$CFG" "${CFG}.bak.$(date +%Y%m%d-%H%M%S)"
 TMP="$(mktemp)"
-jq '.mcpServers["multi-google"] = {"command": "multi-google-mcp"}' "$CFG" > "$TMP" \
+jq --arg cmd "$MGM_BIN" '.mcpServers["multi-google"] = {"command": $cmd}' "$CFG" > "$TMP" \
   && mv "$TMP" "$CFG"
 ```
 
@@ -565,20 +576,21 @@ jq '.mcpServers["multi-google"] = {"command": "multi-google-mcp"}' "$CFG" > "$TM
 >
 > `~/Library/Application Support/Claude/claude_desktop_config.json`
 >
-> I'm going to read what's already in it (so I don't overwrite any other servers you have configured), add an entry for `multi-google`, and write it back. I'll make a backup first."
+> I'm going to read what's already in it (so I don't overwrite any other servers you have configured), add an entry for `multi-google`, and write it back. I'll use the absolute path to the server binary (`<MGM_BIN>`), because Claude Desktop launched from your Dock doesn't see the same PATH as your terminal. I'll make a backup first."
 
 After the write:
 
-> "Done. Your config now includes a `multi-google` entry under `mcpServers`. I backed up your previous config to `<backup-path>` just in case. Next we restart Claude Desktop and verify."
+> "Done. Your config now includes a `multi-google` entry under `mcpServers`, pointing at `<MGM_BIN>`. I backed up your previous config to `<backup-path>` just in case. Next we restart Claude Desktop and verify."
 
 ### Verification
 
 ```bash
-jq -e '.mcpServers["multi-google"].command' \
-  "$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+STORED_CMD="$(jq -r '.mcpServers["multi-google"].command' \
+  "$HOME/Library/Application Support/Claude/claude_desktop_config.json")"
+[ -n "$STORED_CMD" ] && [ -x "$STORED_CMD" ]
 ```
 
-Must return `"multi-google-mcp"`.
+Both checks must succeed — the entry was written AND the stored path points at an executable file.
 
 ### Failure
 
