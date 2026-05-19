@@ -17,3 +17,10 @@ SCOPES = [
 # transport or flood the model context. 10 MiB is enough for normal docs but
 # small enough that a stray request to a huge file fails fast.
 MAX_DRIVE_BYTES = 10 * 1024 * 1024
+
+# Gmail bodies are returned directly into the MCP response (and therefore the
+# model context). A 256 KiB cap covers normal emails plus generous headroom
+# for newsletters/HTML, while still keeping any single message from flooding
+# the conversation. Oversized bodies are truncated with a marker so the agent
+# can still see the head of the message.
+MAX_GMAIL_BODY_BYTES = 256 * 1024

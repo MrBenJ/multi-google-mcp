@@ -8,10 +8,28 @@ from typing import Any
 
 from googleapiclient.discovery import build
 
+from multi_google_mcp import config
 from multi_google_mcp.accounts import AccountStore
 from multi_google_mcp.shaping.gmail import shape_message_full, shape_message_summary
 
 _store = AccountStore()
+
+
+def _truncate_body(body: str) -> str:
+    """Return body unchanged if under cap; otherwise truncate with a marker.
+
+    The marker exposes the real original size so the agent knows the body
+    was clipped and can decide whether to widen the search or skip the
+    message rather than silently working from a partial view.
+    """
+    raw = body.encode("utf-8")
+    if len(raw) <= config.MAX_GMAIL_BODY_BYTES:
+        return body
+    cut = raw[: config.MAX_GMAIL_BODY_BYTES].decode("utf-8", errors="replace")
+    return (
+        f"{cut}\n\n[...truncated: {len(raw)} bytes total, "
+        f"showing first {config.MAX_GMAIL_BODY_BYTES}]"
+    )
 
 
 def _service(account: str) -> Any:
@@ -50,7 +68,9 @@ def gmail_get_message(account: str, message_id: str) -> dict[str, Any]:
         .get(userId="me", id=message_id, format="full")
         .execute()
     )
-    return shape_message_full(msg)
+    shaped = shape_message_full(msg)
+    shaped["body_text"] = _truncate_body(shaped["body_text"])
+    return shaped
 
 
 def _build_raw_message(

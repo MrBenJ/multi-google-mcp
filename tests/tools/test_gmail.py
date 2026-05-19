@@ -1,6 +1,7 @@
 import base64
 from unittest.mock import MagicMock
 
+from multi_google_mcp import config
 from multi_google_mcp.tools.gmail import (
     gmail_get_message,
     gmail_modify_labels,
@@ -103,6 +104,62 @@ def test_gmail_modify_labels_add_and_remove(saved_account, mock_build):
         "addLabelIds": ["Label_1"],
         "removeLabelIds": ["UNREAD"],
     }
+
+
+def test_gmail_get_message_truncates_oversized_body(saved_account, mock_build):
+    """A multi-MB email body must not flood the MCP response.
+
+    Returns the head of the body plus a marker noting the original size so
+    the agent can decide whether to widen the search or skip the message.
+    """
+    service = mock_build["service"]
+    big_body = "x" * (config.MAX_GMAIL_BODY_BYTES + 100_000)
+    service.users().messages().get().execute.return_value = {
+        "id": "m1",
+        "threadId": "t1",
+        "labelIds": ["INBOX"],
+        "snippet": "huge",
+        "payload": {
+            "mimeType": "text/plain",
+            "headers": [
+                {"name": "From", "value": "a@b.com"},
+                {"name": "Subject", "value": "Huge"},
+            ],
+            "body": {"data": _b64url(big_body)},
+        },
+    }
+
+    out = gmail_get_message("work", message_id="m1")
+    assert len(out["body_text"].encode("utf-8")) <= config.MAX_GMAIL_BODY_BYTES + 200
+    assert "truncated" in out["body_text"].lower()
+    # The truncation marker exposes the real original size so the agent knows
+    # what they're missing.
+    assert str(len(big_body)) in out["body_text"]
+
+
+def test_gmail_get_message_returns_full_body_when_under_cap(
+    saved_account, mock_build
+):
+    service = mock_build["service"]
+    body = "small body fits easily"
+    service.users().messages().get().execute.return_value = {
+        "id": "m1",
+        "threadId": "t1",
+        "labelIds": ["INBOX"],
+        "snippet": "ok",
+        "payload": {
+            "mimeType": "text/plain",
+            "headers": [
+                {"name": "From", "value": "a@b.com"},
+                {"name": "Subject", "value": "Ok"},
+            ],
+            "body": {"data": _b64url(body)},
+        },
+    }
+
+    out = gmail_get_message("work", message_id="m1")
+    assert out["body_text"] == body
+    assert "truncated" not in out["body_text"].lower()
 
 
 def test_gmail_modify_labels_trash_flag_routes_to_trash_endpoint(
