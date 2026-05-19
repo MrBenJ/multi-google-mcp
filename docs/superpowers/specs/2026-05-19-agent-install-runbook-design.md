@@ -1,5 +1,12 @@
 # Agent-driven install runbooks — Design
 
+> **Canonical source:** the implementation that shipped lives in
+> `agents/install/claude-desktop.md` and `agents/install/codex.md`. This
+> spec captures the design as discussed during brainstorming. Where the
+> shipped runbooks differ from this doc (e.g., the absolute-path command
+> resolution and refresh-token redact patterns added during code review),
+> the runbooks are authoritative.
+
 **Date:** 2026-05-19
 **Status:** Draft, pending user review
 **Target audience:** Non-technical end-users running an AI agent (Claude
@@ -321,7 +328,11 @@ with the account you added as a test user during the consent screen setup
 'Authentication complete.' Let me know when you see that."
 
 **Verification:** `test -f ~/.config/multi-google-mcp/accounts/<label>.json`
-plus `jq -e .refresh_token ~/.config/multi-google-mcp/accounts/<label>.json`.
+plus `jq -e '.refresh_token != null' ~/.config/multi-google-mcp/accounts/<label>.json >/dev/null`.
+The boolean predicate plus the `>/dev/null` redirect is load-bearing — running
+`jq -e '.refresh_token' <path>` without redirection prints the live OAuth
+refresh token to stdout, which is captured by the agent's conversation
+transcript. The runbook explicitly forbids the unredirected form.
 
 **Failure:** If the browser hangs on `localhost:<port>` — possible firewall
 or VPN interception. Tell the user, suggest disabling VPN temporarily and
@@ -346,29 +357,41 @@ ships macOS-tested behavior only.
 
 **Format:** JSON.
 
-**Schema for the new entry:**
+**Schema for the new entry (`<MGM_BIN>` is the absolute path resolved at
+write time from `command -v multi-google-mcp` — typically
+`/Users/<you>/.local/bin/multi-google-mcp` after `uv tool install`):**
 
 ```json
 {
   "mcpServers": {
     "multi-google": {
-      "command": "multi-google-mcp"
+      "command": "<MGM_BIN>"
     }
   }
 }
 ```
 
+**Why an absolute path?** Claude Desktop is a GUI app. Launched from
+Finder, Dock, or Spotlight it inherits `launchd`'s minimal PATH
+(`/usr/bin:/bin:/usr/sbin:/sbin`) — not the shell PATH that contains
+`~/.local/bin`. A bare-name `"command": "multi-google-mcp"` works from a
+terminal-launched session but fails silently when Claude Desktop is opened
+normally. The runbook resolves the absolute path at write time.
+
 **Read-merge-write:**
 
-1. Read existing config. If file doesn't exist, treat as `{}`.
-2. Validate it parses as JSON. If parse fails, stop and surface the error
+1. Resolve `MGM_BIN="$(command -v multi-google-mcp)"`. Bail if empty.
+2. Read existing config. If file doesn't exist, treat as `{}`.
+3. Validate it parses as JSON. If parse fails, stop and surface the error
    — do not overwrite a malformed config.
-3. Merge: set `.mcpServers["multi-google"] = { command: "multi-google-mcp" }`.
-4. Preserve all other top-level keys and existing `mcpServers` entries.
-5. Write back with 2-space indentation.
+4. Merge: set `.mcpServers["multi-google"] = { command: "$MGM_BIN" }`.
+5. Preserve all other top-level keys and existing `mcpServers` entries.
+6. Write back with 2-space indentation.
 
-**Verification:** `jq -e '.mcpServers["multi-google"].command' <path>`
-returns `"multi-google-mcp"`.
+**Verification:** `jq -r '.mcpServers["multi-google"].command' <path>`
+returns a non-empty path, AND `[ -x "<that-path>" ]` succeeds — confirms
+both that the entry was written and that the stored command points at an
+executable file.
 
 ### 12.2 Codex variant
 
@@ -376,24 +399,31 @@ returns `"multi-google-mcp"`.
 
 **Format:** TOML. Codex's MCP config uses `[mcp_servers.<name>]` sections.
 
-**Schema for the new entry (TOML):**
+**Schema for the new entry (TOML — `<MGM_BIN>` is the absolute path
+resolved from `command -v multi-google-mcp`, same rationale as the Claude
+Desktop variant):**
 
 ```toml
 [mcp_servers.multi-google]
-command = "multi-google-mcp"
+command = "<MGM_BIN>"
 ```
 
 **Read-merge-write:**
 
-1. Read existing config. If file doesn't exist, treat as empty.
-2. Check whether a `[mcp_servers.multi-google]` section already exists. If
-   yes, leave it alone and tell the user it was already wired.
-3. Append the new section to the end of the file with a leading blank line
-   for separation.
-4. Preserve all other sections unmodified.
+1. Resolve `MGM_BIN="$(command -v multi-google-mcp)"`. Bail if empty.
+2. Read existing config. If file doesn't exist, treat as empty.
+3. Check whether a `[mcp_servers.multi-google]` section already exists.
+   - If yes AND the stored command is already executable: leave alone.
+   - If yes BUT the stored command is stale (bare name from a pre-runbook
+     install, or a no-longer-existent path): rewrite that section in place
+     via an awk pass that preserves blank lines and other sections.
+4. If no: append the new section to the end of the file with a leading
+   blank line for separation.
+5. Preserve all other sections unmodified.
 
-**Verification:** `grep -q '^\[mcp_servers\.multi-google\]' ~/.codex/config.toml`
-and `grep -A1 '^\[mcp_servers\.multi-google\]' ~/.codex/config.toml | grep -q 'command = "multi-google-mcp"'`.
+**Verification:** `grep -q '^\[mcp_servers\.multi-google\]' ~/.codex/config.toml`,
+extract the command back out via `sed -n 's/^command = "\(.*\)"$/\1/p'`,
+and require `[ -x "$STORED_CMD" ]`.
 
 Codex itself reads `config.toml` on launch; no other validation needed
 beyond verifying the file is still well-formed TOML afterwards (`codex` is

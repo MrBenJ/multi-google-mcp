@@ -1,5 +1,13 @@
 # Agent-driven install runbooks — Implementation Plan
 
+> **Canonical source:** the implementation that shipped lives in
+> `agents/install/claude-desktop.md` and `agents/install/codex.md`. This
+> plan captures the task decomposition as originally drafted. The shipped
+> runbooks evolved during implementation per code review feedback (refresh-
+> token redaction, absolute-path command resolution in harness configs).
+> Where examples in this plan still echo earlier patterns, treat the
+> runbooks as authoritative.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add `agents/install/claude-desktop.md` and `agents/install/codex.md` — agent-targeted install runbooks that walk a non-technical user through end-to-end setup (GCP, uv, CLI install, account auth, harness config wiring). Modify README to point users at the new runbooks while preserving the existing manual instructions.
@@ -652,11 +660,15 @@ After the user picks a label, run `multi-google-mcp-auth add <label>` and:
 ### Verification
 
 ```bash
+# Confirm the token file exists and contains a non-null refresh_token,
+# without ever printing the secret. Both commands must succeed.
 test -f ~/.config/multi-google-mcp/accounts/<label>.json
-jq -e '.refresh_token' ~/.config/multi-google-mcp/accounts/<label>.json
+jq -e '.refresh_token != null' ~/.config/multi-google-mcp/accounts/<label>.json >/dev/null
 ```
 
-Both must succeed.
+Both must succeed. The boolean predicate `.refresh_token != null` plus
+the `>/dev/null` redirect is load-bearing — `jq -e '.refresh_token' <path>`
+without redirection prints the live OAuth refresh token to stdout.
 
 ### Failure
 
@@ -750,25 +762,37 @@ CFG="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
 test -f "$CFG" && cp "$CFG" "${CFG}.bak.$(date +%Y%m%d-%H%M%S)"
 ```
 
+**Why an absolute path?** Claude Desktop is a GUI app. Launched from
+Finder, Dock, or Spotlight it inherits `launchd`'s minimal PATH
+(`/usr/bin:/bin:/usr/sbin:/sbin`) — not the shell PATH that contains
+`~/.local/bin` where `uv tool install` puts the binary. A bare-name
+`"command": "multi-google-mcp"` looks correct from a terminal but fails
+silently when Claude Desktop launches normally. Phase 5 resolves the
+absolute path via `command -v` at write time.
+
 **Read-merge-write logic:**
 
-1. If `$CFG` does not exist: create it with `{"mcpServers": {"multi-google": {"command": "multi-google-mcp"}}}` (pretty-printed with 2-space indent).
+1. Resolve `MGM_BIN="$(command -v multi-google-mcp)"`. Bail if empty.
 
-2. If `$CFG` exists: read it, validate it parses as JSON. If parse fails, **stop and surface the error** — do not overwrite a malformed config. Tell the user where the backup is.
+2. If `$CFG` does not exist: create it with `{"mcpServers": {"multi-google": {"command": "<MGM_BIN>"}}}` (pretty-printed with 2-space indent).
 
-3. If parse succeeds: set `.mcpServers["multi-google"] = {"command": "multi-google-mcp"}`. Preserve all other top-level keys and all other entries inside `mcpServers`.
+3. If `$CFG` exists: read it, validate it parses as JSON. If parse fails, **stop and surface the error** — do not overwrite a malformed config. Tell the user where the backup is.
 
-4. Write the merged JSON back to `$CFG` with 2-space indent.
+4. If parse succeeds: set `.mcpServers["multi-google"] = {"command": "$MGM_BIN"}`. Preserve all other top-level keys and all other entries inside `mcpServers`.
+
+5. Write the merged JSON back to `$CFG` with 2-space indent.
 
 The agent does this using whichever tool is most reliable for it — typically reading the file, parsing in memory, modifying the structure, and writing it back via its file-write tool. The `jq` one-liner below is a sanity-checkable shortcut when the agent doesn't have a JSON-aware edit tool:
 
 ```bash
 CFG="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+MGM_BIN="$(command -v multi-google-mcp)"
+[ -n "$MGM_BIN" ] || { echo "multi-google-mcp not on PATH — rerun Phase 3 first."; exit 1; }
 mkdir -p "$(dirname "$CFG")"
 test -f "$CFG" || echo '{}' > "$CFG"
 cp "$CFG" "${CFG}.bak.$(date +%Y%m%d-%H%M%S)"
 TMP="$(mktemp)"
-jq '.mcpServers["multi-google"] = {"command": "multi-google-mcp"}' "$CFG" > "$TMP" && mv "$TMP" "$CFG"
+jq --arg cmd "$MGM_BIN" '.mcpServers["multi-google"] = {"command": $cmd}' "$CFG" > "$TMP" && mv "$TMP" "$CFG"
 ```
 
 ### User-facing template
@@ -777,20 +801,21 @@ jq '.mcpServers["multi-google"] = {"command": "multi-google-mcp"}' "$CFG" > "$TM
 >
 > `~/Library/Application Support/Claude/claude_desktop_config.json`
 >
-> I'm going to read what's already in it (so I don't overwrite any other servers you have configured), add an entry for `multi-google`, and write it back. I'll make a backup first."
+> I'm going to read what's already in it (so I don't overwrite any other servers you have configured), add an entry for `multi-google` with the absolute path to the server binary, and write it back. I'll make a backup first."
 
 After the write:
 
-> "Done. Your config now includes a `multi-google` entry under `mcpServers`. I backed up your previous config to `<backup-path>` just in case. Next we restart Claude Desktop and verify."
+> "Done. Your config now includes a `multi-google` entry under `mcpServers`, pointing at `<MGM_BIN>`. I backed up your previous config to `<backup-path>` just in case. Next we restart Claude Desktop and verify."
 
 ### Verification
 
 ```bash
-jq -e '.mcpServers["multi-google"].command' \
-  "$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+STORED_CMD="$(jq -r '.mcpServers["multi-google"].command' \
+  "$HOME/Library/Application Support/Claude/claude_desktop_config.json")"
+[ -n "$STORED_CMD" ] && [ -x "$STORED_CMD" ]
 ```
 
-Must return `"multi-google-mcp"`.
+Both checks must succeed — the entry was written AND the stored path points at an executable file.
 
 ### Failure
 
@@ -883,10 +908,12 @@ Expected: `7` (Phases 0, 1, 2, 3, 4, 5, 6).
 - [ ] **Step 3: Verify the file's `jq` operations are syntactically valid**
 
 ```bash
-# Test the read-merge-write jq operation on a temp file
+# Test the read-merge-write jq operation on a temp file, using the
+# absolute-path pattern the runbook actually emits.
 TMP=$(mktemp)
 echo '{"mcpServers": {"existing": {"command": "foo"}}}' > "$TMP"
-jq '.mcpServers["multi-google"] = {"command": "multi-google-mcp"}' "$TMP"
+MGM_BIN="$(command -v multi-google-mcp || echo /scratch/fake-bin)"
+jq --arg cmd "$MGM_BIN" '.mcpServers["multi-google"] = {"command": $cmd}' "$TMP"
 ```
 
 Expected: prints a JSON object containing both `existing` and `multi-google` under `mcpServers`. Both keys preserved.
@@ -994,17 +1021,24 @@ Codex reads MCP server definitions from `~/.codex/config.toml`. We append a `[mc
 grep -q '^\[mcp_servers\.multi-google\]' "$HOME/.codex/config.toml" 2>/dev/null
 ```
 
-If this matches, also verify the command line:
+If this matches, also extract the stored command and verify it points at an executable:
 
 ```bash
-grep -A2 '^\[mcp_servers\.multi-google\]' "$HOME/.codex/config.toml" | grep -q 'command = "multi-google-mcp"'
+STORED_CMD="$(grep -A2 '^\[mcp_servers\.multi-google\]' "$HOME/.codex/config.toml" \
+  | sed -n 's/^command = "\(.*\)"$/\1/p' | head -1)"
+[ -n "$STORED_CMD" ] && [ -x "$STORED_CMD" ]
 ```
 
-If both pass, skip to Phase 6.
+If both pass, skip to Phase 6. If the section exists but `STORED_CMD` isn't executable (typical with a bare-name install pre-this-runbook), continue with Phase 5 to overwrite with the absolute path.
 
 ### Commands
 
 **Path:** `$HOME/.codex/config.toml`.
+
+**Why an absolute path?** Codex inherits the shell PATH when launched from
+a login terminal, but not under launchd, GUI wrappers, or non-login shells.
+We resolve the absolute path via `command -v` at write time so the config
+is robust across all launch contexts.
 
 **Backup before write:**
 
@@ -1013,25 +1047,41 @@ CFG="$HOME/.codex/config.toml"
 test -f "$CFG" && cp "$CFG" "${CFG}.bak.$(date +%Y%m%d-%H%M%S)"
 ```
 
-**Append-only logic:**
+**Append-or-replace logic:**
 
-1. Ensure the parent directory exists: `mkdir -p ~/.codex`.
-2. If `$CFG` does not exist: create it containing only the new section.
-3. If `$CFG` exists: check whether `[mcp_servers.multi-google]` already appears (case-sensitive). If yes, stop — it's already wired. If no, append a leading blank line followed by the section.
+1. Resolve `MGM_BIN="$(command -v multi-google-mcp)"`. Bail if empty.
+2. Ensure the parent directory exists: `mkdir -p ~/.codex`.
+3. If `$CFG` does not exist: create it containing only the new section with the absolute path.
+4. If `$CFG` exists AND the `[mcp_servers.multi-google]` section is already there: rewrite just that section in place (preserving other sections and blank lines) so the `command` line points at `$MGM_BIN`.
+5. If `$CFG` exists AND the section is not present yet: append a leading blank line followed by the new section.
 
 ```bash
 CFG="$HOME/.codex/config.toml"
+MGM_BIN="$(command -v multi-google-mcp)"
+[ -n "$MGM_BIN" ] || { echo "multi-google-mcp not on PATH — rerun Phase 3 first."; exit 1; }
 mkdir -p "$(dirname "$CFG")"
+test -f "$CFG" && cp "$CFG" "${CFG}.bak.$(date +%Y%m%d-%H%M%S)"
 
-if grep -q '^\[mcp_servers\.multi-google\]' "$CFG" 2>/dev/null; then
-  echo "Already wired — leaving config alone."
+if [ -f "$CFG" ] && grep -q '^\[mcp_servers\.multi-google\]' "$CFG"; then
+  TMP="$(mktemp)"
+  awk -v cmd="$MGM_BIN" '
+    BEGIN { in_sec = 0 }
+    /^\[mcp_servers\.multi-google\][[:space:]]*$/ {
+      in_sec = 1
+      print "[mcp_servers.multi-google]"
+      print "command = \"" cmd "\""
+      next
+    }
+    in_sec && /^\[/ { in_sec = 0 }
+    in_sec && /^$/ { in_sec = 0 }
+    !in_sec { print }
+  ' "$CFG" > "$TMP" && mv "$TMP" "$CFG"
 else
-  test -f "$CFG" && cp "$CFG" "${CFG}.bak.$(date +%Y%m%d-%H%M%S)"
   {
     test -f "$CFG" && cat "$CFG"
     test -f "$CFG" && echo ""
     echo "[mcp_servers.multi-google]"
-    echo 'command = "multi-google-mcp"'
+    echo "command = \"$MGM_BIN\""
   } > "${CFG}.new"
   mv "${CFG}.new" "$CFG"
 fi
@@ -1043,20 +1093,22 @@ fi
 >
 > `~/.codex/config.toml`
 >
-> I'm going to read what's already in it (so I don't disturb any other settings you have), add a `[mcp_servers.multi-google]` section, and write it back. I'll make a backup first."
+> I'm going to read what's already in it (so I don't disturb any other settings you have), add a `[mcp_servers.multi-google]` section with the absolute path to the server binary (`<MGM_BIN>`), and write it back. I'll make a backup first."
 
 After the write:
 
-> "Done. Your config now includes the `multi-google` server. I backed up your previous config to `<backup-path>` just in case. Next we restart Codex and verify."
+> "Done. Your config now includes the `multi-google` server pointing at `<MGM_BIN>`. I backed up your previous config to `<backup-path>` just in case. Next we restart Codex and verify."
 
 ### Verification
 
 ```bash
 grep -q '^\[mcp_servers\.multi-google\]' "$HOME/.codex/config.toml"
-grep -A2 '^\[mcp_servers\.multi-google\]' "$HOME/.codex/config.toml" | grep -q 'command = "multi-google-mcp"'
+STORED_CMD="$(grep -A2 '^\[mcp_servers\.multi-google\]' "$HOME/.codex/config.toml" \
+  | sed -n 's/^command = "\(.*\)"$/\1/p' | head -1)"
+[ -n "$STORED_CMD" ] && [ -x "$STORED_CMD" ]
 ```
 
-Both must succeed.
+All three checks must succeed.
 
 ### Failure
 
@@ -1131,11 +1183,12 @@ CFG="$SCRATCH/config.toml"
 echo '[some_other_section]
 key = "value"' > "$CFG"
 
+MGM_BIN="$(command -v multi-google-mcp || echo /scratch/fake-bin)"
 {
   cat "$CFG"
   echo ""
   echo "[mcp_servers.multi-google]"
-  echo 'command = "multi-google-mcp"'
+  echo "command = \"$MGM_BIN\""
 } > "${CFG}.new"
 mv "${CFG}.new" "$CFG"
 
