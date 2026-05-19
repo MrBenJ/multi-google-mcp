@@ -1,5 +1,9 @@
 import base64
 
+import pytest
+
+from multi_google_mcp import config
+from multi_google_mcp.exceptions import DriveFileTooLarge
 from multi_google_mcp.tools.drive import (
     drive_delete_file,
     drive_get_file_metadata,
@@ -110,3 +114,57 @@ def test_drive_delete_file_calls_delete(saved_account, mock_build):
     out = drive_delete_file("work", file_id="f1")
     assert out == {"deleted": True, "id": "f1"}
     svc.files().delete.assert_called_with(fileId="f1")
+
+
+def test_drive_read_file_rejects_oversized_binary_before_download(
+    saved_account, mock_build
+):
+    svc = mock_build["service"]
+    too_big = config.MAX_DRIVE_BYTES + 1
+    svc.files().get().execute.return_value = {
+        "id": "f1",
+        "name": "huge.bin",
+        "mimeType": "application/octet-stream",
+        "size": str(too_big),
+    }
+
+    with pytest.raises(DriveFileTooLarge) as excinfo:
+        drive_read_file("work", file_id="f1")
+    assert excinfo.value.size == too_big
+    # Crucially: we never downloaded the body.
+    svc.files().get_media.assert_not_called()
+
+
+def test_drive_read_file_rejects_oversized_export_after_fetch(
+    saved_account, mock_build
+):
+    """Native files report size=0 in metadata, so we can only check after export."""
+    svc = mock_build["service"]
+    svc.files().get().execute.return_value = {
+        "id": "f1",
+        "name": "huge.gdoc",
+        "mimeType": "application/vnd.google-apps.document",
+    }
+    svc.files().export().execute.return_value = b"x" * (config.MAX_DRIVE_BYTES + 1)
+
+    with pytest.raises(DriveFileTooLarge):
+        drive_read_file("work", file_id="f1")
+
+
+def test_drive_upload_file_rejects_oversized_text(saved_account, mock_build):
+    big = "x" * (config.MAX_DRIVE_BYTES + 1)
+    with pytest.raises(DriveFileTooLarge):
+        drive_upload_file(
+            "work", name="big.txt", content=big, mime_type="text/plain"
+        )
+
+
+def test_drive_upload_file_rejects_oversized_binary(saved_account, mock_build):
+    big = base64.b64encode(b"x" * (config.MAX_DRIVE_BYTES + 1)).decode()
+    with pytest.raises(DriveFileTooLarge):
+        drive_upload_file(
+            "work",
+            name="big.bin",
+            content=big,
+            mime_type="application/octet-stream",
+        )

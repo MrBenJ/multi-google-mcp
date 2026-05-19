@@ -9,12 +9,19 @@ from typing import Any
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 
+from multi_google_mcp import config
 from multi_google_mcp.accounts import AccountStore
+from multi_google_mcp.exceptions import DriveFileTooLarge
 from multi_google_mcp.shaping.drive import export_mime_for, shape_file_metadata
 
 _store = AccountStore()
 
 _DEFAULT_FIELDS = "id,name,mimeType,size,parents,modifiedTime,webViewLink"
+
+
+def _check_size(size: int) -> None:
+    if size > config.MAX_DRIVE_BYTES:
+        raise DriveFileTooLarge(size, config.MAX_DRIVE_BYTES)
 
 
 def _service(account: str) -> Any:
@@ -43,12 +50,15 @@ def drive_get_file_metadata(account: str, file_id: str) -> dict[str, Any]:
 
 def drive_read_file(account: str, file_id: str) -> dict[str, Any]:
     svc = _service(account)
-    meta = svc.files().get(fileId=file_id, fields="id,name,mimeType").execute()
+    meta = svc.files().get(fileId=file_id, fields="id,name,mimeType,size").execute()
     export_mime = export_mime_for(meta["mimeType"])
     if export_mime:
+        # Google-native files report size=0 in metadata, so we can't pre-check.
+        # Fetch the export and check size before encoding into the response.
         raw_bytes: bytes = (
             svc.files().export(fileId=file_id, mimeType=export_mime).execute()
         )
+        _check_size(len(raw_bytes))
         return {
             "id": meta["id"],
             "name": meta["name"],
@@ -56,6 +66,8 @@ def drive_read_file(account: str, file_id: str) -> dict[str, Any]:
             "encoding": "text",
             "content": raw_bytes.decode("utf-8", errors="replace"),
         }
+    # Binary file: pre-check from metadata so we never download the body.
+    _check_size(int(meta.get("size", 0) or 0))
     raw_bytes = svc.files().get_media(fileId=file_id).execute()
     return {
         "id": meta["id"],
@@ -71,6 +83,7 @@ def _media(content: str, mime_type: str) -> MediaIoBaseUpload:
 
     Text-ish mime types are passed through as UTF-8 bytes; anything else
     is decoded from base64 so callers can ship arbitrary binary content.
+    Raises DriveFileTooLarge if the decoded payload exceeds MAX_DRIVE_BYTES.
     """
     if mime_type.startswith("text/") or mime_type in (
         "application/json",
@@ -79,6 +92,7 @@ def _media(content: str, mime_type: str) -> MediaIoBaseUpload:
         data = content.encode("utf-8")
     else:
         data = base64.b64decode(content)
+    _check_size(len(data))
     return MediaIoBaseUpload(io.BytesIO(data), mimetype=mime_type, resumable=False)
 
 
