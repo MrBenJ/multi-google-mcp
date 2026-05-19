@@ -361,3 +361,154 @@ If the user says any variant of "I can't do this right now," "let me come back t
 - Do **not** attempt to log into the user's Google account or use any browser-automation tooling. The runbook is strictly conversational at this phase.
 - Do **not** advance from sub-phase 1i to Phase 2 if `jq` verification fails. Stop and ask the user to confirm what they downloaded.
 - Do **not** use a globbed path (`client_secret_*.json`) as the source argument to `mv`. Always use the literal `CONFIRMED_PATH` from 1h.
+
+---
+
+## Phase 2 — Install `uv`
+
+`uv` is the Python package manager this server uses. It's a single binary, no system Python changes required.
+
+### Detection
+
+```bash
+command -v uv
+```
+
+If this returns a path, skip to Phase 3.
+
+### Commands
+
+If `uv` is missing, **ask the user to run the install command in their own terminal** rather than executing it on their behalf:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+After the user reports it ran, re-run detection.
+
+### User-facing template
+
+> "I don't see `uv` installed yet. `uv` is a fast Python package manager — it's the tool that will install the server's command-line interface.
+>
+> Could you paste this into your terminal? It downloads `uv` and adds it to your shell:
+>
+> ```
+> curl -LsSf https://astral.sh/uv/install.sh | sh
+> ```
+>
+> Let me know once it finishes — it usually takes 10-30 seconds."
+
+### Failure
+
+If detection still fails after the user confirms:
+
+- Their current shell may not have the new PATH yet. Ask them to run `source ~/.zshrc` (or open a new terminal).
+- If still not on PATH after a fresh shell, ask them to paste the install output — there may have been an error.
+
+### Exit ramp
+
+None — single-command phase.
+
+---
+
+## Phase 3 — Install the CLI
+
+This installs `multi-google-mcp` (the server) and `multi-google-mcp-auth` (the account manager) as shell commands on the user's PATH.
+
+### Detection
+
+```bash
+command -v multi-google-mcp && command -v multi-google-mcp-auth
+```
+
+If both return paths, skip to Phase 4.
+
+### Commands
+
+Run from the repo root:
+
+```bash
+cd "$(git rev-parse --show-toplevel)" && uv tool install .
+```
+
+After this completes, re-run detection.
+
+### User-facing template
+
+> "Now I'm going to install the server's CLI from this repository. It puts two commands on your PATH:
+> - `multi-google-mcp` — the server itself (Claude Desktop will start it automatically)
+> - `multi-google-mcp-auth` — for connecting your Google accounts
+>
+> Running it now…"
+
+After the install:
+
+> "Done. The two commands are now on your PATH. Next step is connecting your first Google account."
+
+### Failure
+
+- If `uv tool install .` errors with a Python version complaint: check `python3 --version` ≥ 3.11. If lower, install Python 3.11+ first.
+- If it errors with a network/registry issue: ask the user to try again in a minute (transient PyPI hiccup).
+- If errors persist, surface the full output to the user and stop — do not guess.
+
+### Exit ramp
+
+None.
+
+---
+
+## Phase 4 — Add the first Google account
+
+This connects a Google account to the server. The user can add more accounts later by repeating this phase with a different label.
+
+### Detection
+
+```bash
+find ~/.config/multi-google-mcp/accounts -maxdepth 1 -name '*.json' 2>/dev/null | head -1
+```
+
+If any account file is printed, skip to Phase 5.
+
+### Commands
+
+Ask the user for a label (suggest `personal`), then run:
+
+```bash
+multi-google-mcp-auth add <label>
+```
+
+This opens a browser for the OAuth consent flow.
+
+### User-facing template
+
+> "Time to connect your first Google account. Each connected account gets a short label so you can refer to it later (like 'personal' or 'work').
+>
+> What label would you like to use for the first account? (If you're not sure, `personal` is a fine default.)"
+
+After the user picks a label, run `multi-google-mcp-auth add <label>` and:
+
+> "A browser window should be opening in a moment. It'll ask you to sign in to Google — use the same account you added as a test user during the consent screen setup back in sub-phase 1f. After you sign in, Google will list the permissions this server needs (Gmail, Calendar, Drive). Click **Allow**.
+>
+> When the browser tab shows 'Authentication complete' (or similar), come back here and let me know."
+
+### Verification
+
+```bash
+test -f ~/.config/multi-google-mcp/accounts/<label>.json
+jq -e '.refresh_token' ~/.config/multi-google-mcp/accounts/<label>.json
+```
+
+Both must succeed.
+
+### Failure
+
+- **Browser hangs on `localhost:<port>` after consent:** A firewall, VPN, or proxy is intercepting localhost. Tell the user to temporarily disable their VPN and retry `multi-google-mcp-auth add <label>`.
+- **`Error 403: access_denied`:** The signed-in Google account wasn't added as a test user in sub-phase 1f. Walk back to 1f, add the account, then retry.
+- **`Error: scope ... not granted`:** The user unchecked one of the requested permissions. Retry and grant everything.
+
+### Exit ramp
+
+The user can defer this phase. If they say "I'll connect an account later":
+
+1. Tell them: *"That's fine. The server will be wired into Claude Desktop in the next step, but it won't do anything useful until you add at least one account. When you're ready, just run `multi-google-mcp-auth add <label>` from any terminal."*
+2. Skip to Phase 5. The harness wiring is still useful even without accounts.
