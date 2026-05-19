@@ -1,8 +1,32 @@
+import datetime as dt
 import json
 from pathlib import Path
+from unittest.mock import patch
+
+import pytest
 
 from multi_google_mcp.accounts import AccountInfo, AccountStore
+from multi_google_mcp.exceptions import (
+    AccountNeedsReauth,
+    AccountNotConfigured,
+    OAuthClientNotConfigured,
+)
 from tests.conftest import write_account_file
+
+
+def _write_fake_client_secret(tmp_config_dir: Path) -> None:
+    (tmp_config_dir / "client_secret.json").write_text(
+        json.dumps(
+            {
+                "installed": {
+                    "client_id": "fake.apps.googleusercontent.com",
+                    "client_secret": "fakesecret",
+                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                }
+            }
+        )
+    )
 
 
 def test_list_returns_empty_when_no_accounts(tmp_config_dir: Path):
@@ -37,3 +61,51 @@ def test_save_writes_token_file_chmod_600(tmp_config_dir: Path):
     assert data["email"] == "alice@example.com"
     assert data["refresh_token"] == "r"
     assert (path.stat().st_mode & 0o777) == 0o600
+
+
+def test_credentials_raises_when_label_unknown(tmp_config_dir: Path):
+    with pytest.raises(AccountNotConfigured) as excinfo:
+        AccountStore().credentials("nope")
+    assert "nope" in str(excinfo.value)
+
+
+def test_credentials_raises_when_client_secret_missing(tmp_config_dir: Path):
+    write_account_file(tmp_config_dir / "accounts", "work", "a@b.com")
+    with pytest.raises(OAuthClientNotConfigured):
+        AccountStore().credentials("work")
+
+
+def test_credentials_returns_google_credentials_from_disk(tmp_config_dir: Path):
+    write_account_file(tmp_config_dir / "accounts", "work", "a@b.com")
+    _write_fake_client_secret(tmp_config_dir)
+
+    creds = AccountStore().credentials("work")
+    assert creds.refresh_token == "refresh-xyz"
+    assert creds.token == "access-xyz"
+    assert creds.client_id == "fake.apps.googleusercontent.com"
+
+
+def test_credentials_refresh_writes_back_new_access_token(tmp_config_dir: Path):
+    write_account_file(tmp_config_dir / "accounts", "work", "a@b.com")
+    _write_fake_client_secret(tmp_config_dir)
+    store = AccountStore()
+
+    creds = store.credentials("work")
+    creds.token = "NEW-access-token"  # type: ignore[misc]
+    creds.expiry = dt.datetime(2099, 12, 31, 0, 0, 0)  # type: ignore[misc]
+    store._on_refresh("work", creds)
+
+    data = json.loads((tmp_config_dir / "accounts" / "work.json").read_text())
+    assert data["access_token"] == "NEW-access-token"
+
+
+def test_credentials_raises_account_needs_reauth_on_invalid_grant(tmp_config_dir: Path):
+    write_account_file(tmp_config_dir / "accounts", "work", "a@b.com")
+    _write_fake_client_secret(tmp_config_dir)
+    store = AccountStore()
+    creds = store.credentials("work")
+
+    with patch.object(creds, "refresh", side_effect=Exception("invalid_grant")):
+        with pytest.raises(AccountNeedsReauth) as excinfo:
+            store.refresh_if_needed("work", creds, force=True)
+        assert "work" in str(excinfo.value)
