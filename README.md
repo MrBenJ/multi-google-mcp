@@ -22,7 +22,31 @@ same conversation.
 - [`uv`](https://docs.astral.sh/uv/) (recommended) or `pipx`
 - A Google account with admin access to a GCP project (free tier is fine)
 
-## GCP setup (one-time)
+---
+
+## Quick install (let an agent do it)
+
+If you have an AI agent running this repo locally (Claude Desktop, Codex CLI,
+etc.), you can ask it to install this server for you end-to-end — including
+the Google Cloud setup. Just tell your agent:
+
+> "Install this server. The runbook is in `agents/install/`."
+
+It will pick the right runbook for your harness and walk you through every
+step, including Google Cloud project setup if you haven't done it yet.
+
+Currently supported harnesses:
+
+- **Claude Desktop** — [`agents/install/claude-desktop.md`](agents/install/claude-desktop.md)
+- **Codex CLI** — [`agents/install/codex.md`](agents/install/codex.md)
+
+For manual setup, see the "Manual install" section below.
+
+---
+
+## Manual install
+
+### GCP setup (one-time)
 
 Hand these steps to anyone using this server for the first time.
 
@@ -78,7 +102,7 @@ In the project, go to **APIs & Services → Library** and search/enable each:
 
 ---
 
-## Install
+### Install
 
 ```bash
 # from a clone of this repo
@@ -90,7 +114,7 @@ This puts two commands on your `PATH`:
 - `multi-google-mcp` — the MCP server (started by Claude Desktop)
 - `multi-google-mcp-auth` — manage local OAuth tokens
 
-## Add your first account
+### Add your first account
 
 ```bash
 multi-google-mcp-auth add personal
@@ -117,7 +141,7 @@ Remove an account:
 multi-google-mcp-auth remove personal
 ```
 
-## Wire into Claude Desktop
+### Wire into Claude Desktop
 
 Edit `~/Library/Application Support/Claude/claude_desktop_config.json` and
 add an entry under `mcpServers`:
