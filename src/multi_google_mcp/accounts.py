@@ -6,6 +6,7 @@ import builtins
 import datetime as dt
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -17,8 +18,18 @@ from multi_google_mcp import config
 from multi_google_mcp.exceptions import (
     AccountNeedsReauth,
     AccountNotConfigured,
+    InvalidAccountLabel,
     OAuthClientNotConfigured,
 )
+
+# Slug pattern: alphanumerics, hyphen, underscore. 1-64 chars. Anything else
+# risks path traversal into ACCOUNTS_DIR via labels like "../../etc/passwd".
+_LABEL_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _validate_label(label: str) -> None:
+    if not isinstance(label, str) or not _LABEL_RE.fullmatch(label):
+        raise InvalidAccountLabel(label)
 
 
 @dataclass(frozen=True)
@@ -31,6 +42,7 @@ class AccountStore:
     """Reads, writes, and refreshes per-account token files."""
 
     def _path(self, label: str) -> Path:
+        _validate_label(label)
         return config.ACCOUNTS_DIR / f"{label}.json"
 
     def _load_client_config(self) -> dict[str, Any]:

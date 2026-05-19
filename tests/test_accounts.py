@@ -9,6 +9,7 @@ from multi_google_mcp.accounts import AccountInfo, AccountStore
 from multi_google_mcp.exceptions import (
     AccountNeedsReauth,
     AccountNotConfigured,
+    InvalidAccountLabel,
     OAuthClientNotConfigured,
 )
 from tests.conftest import write_account_file
@@ -97,6 +98,63 @@ def test_credentials_refresh_writes_back_new_access_token(tmp_config_dir: Path):
 
     data = json.loads((tmp_config_dir / "accounts" / "work.json").read_text())
     assert data["access_token"] == "NEW-access-token"
+
+
+@pytest.mark.parametrize(
+    "evil_label",
+    [
+        "../escape",
+        "../../etc/passwd",
+        "subdir/leak",
+        "back\\slash",
+        ".hidden",
+        "..",
+        "",
+        "has space",
+        "a" * 65,  # over length cap
+    ],
+)
+def test_save_rejects_malicious_labels(tmp_config_dir: Path, evil_label: str):
+    store = AccountStore()
+    with pytest.raises(InvalidAccountLabel):
+        store.save(
+            label=evil_label,
+            email="x@y.com",
+            refresh_token="r",
+            access_token="a",
+            token_expiry="2099-01-01T00:00:00Z",
+            scopes=["https://www.googleapis.com/auth/gmail.modify"],
+        )
+
+
+@pytest.mark.parametrize("evil_label", ["../escape", "subdir/leak", ".hidden", ".."])
+def test_credentials_rejects_malicious_labels(tmp_config_dir: Path, evil_label: str):
+    with pytest.raises(InvalidAccountLabel):
+        AccountStore().credentials(evil_label)
+
+
+@pytest.mark.parametrize("evil_label", ["../escape", "subdir/leak", ".hidden", ".."])
+def test_remove_rejects_malicious_labels(tmp_config_dir: Path, evil_label: str):
+    with pytest.raises(InvalidAccountLabel):
+        AccountStore().remove(evil_label)
+
+
+def test_save_does_not_create_files_outside_accounts_dir(tmp_config_dir: Path):
+    """Even if validation were bypassed, the resolved path stays in ACCOUNTS_DIR.
+
+    This is a belt-and-braces test against future regressions.
+    """
+    store = AccountStore()
+    with pytest.raises(InvalidAccountLabel):
+        store.save(
+            label="../../../tmp/leaked",
+            email="x@y.com",
+            refresh_token="r",
+            access_token="a",
+            token_expiry="2099-01-01T00:00:00Z",
+            scopes=["https://www.googleapis.com/auth/gmail.modify"],
+        )
+    assert not (tmp_config_dir.parent / "tmp" / "leaked.json").exists()
 
 
 def test_credentials_raises_account_needs_reauth_on_invalid_grant(tmp_config_dir: Path):
