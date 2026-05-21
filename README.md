@@ -193,9 +193,3 @@ Takes ~30 seconds. If everything passes, your local setup is good.
 | `OAuth client not configured` | `~/.config/multi-google-mcp/client_secret.json` missing | Re-download from GCP Credentials |
 | Google `403: insufficient permissions` | Scope wasn't requested or wasn't granted | Add the scope in `config.py`, re-auth |
 | Browser hangs on `localhost:<port>` after consent | Local callback failed | Re-run `add`; firewall/VPN may be intercepting localhost |
-
-## Project layout
-
-See [`docs/superpowers/specs/2026-05-18-multi-google-mcp-design.md`](docs/superpowers/specs/2026-05-18-multi-google-mcp-design.md)
-and [`docs/superpowers/plans/2026-05-18-multi-google-mcp.md`](docs/superpowers/plans/2026-05-18-multi-google-mcp.md)
-for the design and step-by-step implementation history.
