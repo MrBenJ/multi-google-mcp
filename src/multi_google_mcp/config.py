@@ -11,6 +11,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/calendar",
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/userinfo.email",
+    "openid",
 ]
 
 # Cap on Drive payload size (read or upload) so a 1 GB PDF can't hang the MCP
