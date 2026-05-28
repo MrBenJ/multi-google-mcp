@@ -207,6 +207,18 @@ open https://console.cloud.google.com/apis/credentials/consent
 >
 > You should now see 'Publishing status: Testing' in the dashboard. Let me know when you're there."
 
+> **Mention this to the user before moving on (free-Gmail caveat):**
+>
+> "One thing to know up front: if the account you're connecting is a
+> regular free Gmail account (an `@gmail.com` address), Google expires
+> the refresh token after 7 days while the app is in Testing status.
+> That means you'll need to rerun `multi-google-mcp-auth add <label>`
+> for that account about once a week. There's no way around this
+> short of publishing the app, which doesn't make sense for a local
+> single-user server. If you're connecting a **Google Workspace**
+> account (custom domain managed by an admin), the 7-day expiry does
+> **not** apply — Workspace tokens stay valid until you revoke them."
+
 **Checkpoint:** User confirms "Publishing status: Testing."
 
 ---

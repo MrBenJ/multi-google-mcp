@@ -79,9 +79,19 @@ In the project, go to **APIs & Services → Library** and search/enable each:
 7. **Save and continue → Back to dashboard**
 
 > Keep publishing status as **Testing**. For personal use this is fine.
-> One quirk: in Testing mode Google sometimes expires refresh tokens
-> after 7 days unless the consenting account is also a test user — which
-> we just added, so you're covered.
+
+> **Heads up — free Gmail (`@gmail.com`) accounts re-auth every 7 days.**
+> In Testing publishing status, Google expires refresh tokens issued to
+> consumer Gmail accounts after 7 days. There is no way to extend this
+> without verifying the app for production, which a single-user local
+> server can't reasonably do. Every connected `@gmail.com` account will
+> need `multi-google-mcp-auth add <label>` rerun once a week — expect
+> this and don't treat it as a bug.
+>
+> **Google Workspace accounts (custom domain managed by a Workspace
+> admin) are not affected** — refresh tokens issued to Workspace
+> identities don't expire on the 7-day clock, so a Workspace account
+> stays connected until you explicitly revoke it.
 
 ### 4. Create the OAuth client
 
